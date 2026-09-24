@@ -26,6 +26,8 @@ The Host half subscribes to the process-wide `session/event` feed and folds ever
 
 One sample per assistant step, across **all sessions** in the Host (main sessions, subagents, workflows), persisted as JSON lines.
 
+`tps` is only reported when the decode window can carry the measurement. A window shorter than 250 ms measures delivery granularity rather than decoding, and an implied rate above `maxPlausibleTps` (default 500 tok/s) means the provider handed over the whole completion in one burst instead of streaming it. Those samples keep their timing and token counts and are marked `unmeasurable`, so the rate stays derivable while aggregates and charts stay honest — a single burst otherwise reports tens of thousands of tokens per second.
+
 ## Panel
 
 The sidebar gains a gauge icon → a **Throughput** panel with five linked views over the same samples:
@@ -66,6 +68,7 @@ Open **Settings → Plugins → tok speed** (the bundle's own configuration page
 | `maxFileBytes` | `5242880` (5 MB) | File size cap; when the next sample would exceed it, the oldest lines are rotated out down to 75% of the cap. `0` disables. |
 | `maxAgeDays` | `7` | Sample age cap in days; a periodic sweep drops older lines. `0` disables. |
 | `sampleMinIntervalMs` | `0` | Minimum wall-clock gap between recorded samples. `60000` ≈ at most one sample per minute. `0` records every assistant step. |
+| `maxPlausibleTps` | `500` | Ceiling on a credible decode rate. Faster readings are marked `unmeasurable` rather than reported, because they come from a provider delivering the completion in one burst. |
 | `sweepIntervalMinutes` | `60` | How often the age/size sweep runs. |
 | `includeSessionIds` | `true` | Write `sessionId` into each sample. Turn off for shared data directories. |
 | `dataDir` | *(empty)* | Directory for `samples.jsonl`. Empty uses the DSH home (`~/.dsh/tokspeed/`), or the profile directory when `DSH_PROFILE_DIR` is exported. |
@@ -100,7 +103,7 @@ Samples contain model/provider names, token counts, timings, and (by default) se
 
 ## Known Limitations
 
-- `tps` reflects the decode window only; providers may batch multiple tokens per chunk at high speeds, so very fast models can read slightly low.
+- `tps` reflects the decode window only. A provider that buffers the completion and delivers it in a burst yields a window far shorter than the real decode time; such steps are marked `unmeasurable` instead of being reported as absurd rates.
 - The store is one JSONL file per DSH home — plenty for weeks of retention, but it is not a time-series database.
 - Failed attempts (`assistant/attempt`) are not sampled; only committed assistant messages are.
 

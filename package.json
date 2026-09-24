@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-tokspeed",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Record per-step model decode throughput (tokens/second) in the DeepSeek Harness and chart it in the Web UI: scatter, histogram with normal fit, per-model IQR box plot, hour-of-day medians, and a stats table.",
   "license": "MIT",
   "author": "Huakun Shen <huakun.shen@huakun.shen.com>",
@@ -33,7 +33,9 @@
     "@deepseek-ai/schemastery": "^3.18.2"
   },
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "immediately": true,

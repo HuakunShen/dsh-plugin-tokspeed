@@ -37,6 +37,10 @@ const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024
 const ROTATE_TARGET_FRACTION = 0.75
 /** Default sample age cap in days. */
 const DEFAULT_MAX_AGE_DAYS = 7
+/** Decode windows shorter than this measure delivery granularity, not decoding. */
+const MIN_DECODE_MS = 250
+/** Default ceiling on a credible decode rate (tok/s). */
+const DEFAULT_MAX_PLAUSIBLE_TPS = 500
 
 /** Validated settings schema; every field is optional. The Loader applies it to entry `config:` blocks. */
 export const Config = z.object({
@@ -48,6 +52,8 @@ export const Config = z.object({
   sampleMinIntervalMs: z.natural().default(0),
   /** How often the age sweep runs, in minutes. */
   sweepIntervalMinutes: z.natural().min(1).default(60),
+  /** Ceiling on a credible decode rate (tok/s); a faster reading means the provider delivered a burst, not a stream. */
+  maxPlausibleTps: z.natural().min(1).default(DEFAULT_MAX_PLAUSIBLE_TPS),
   /** Write sessionId into each sample; disable on shared data directories. */
   includeSessionIds: z.boolean().default(true),
   /** Directory for samples.jsonl; empty uses `<dsh home>/tokspeed`. Changing it requires a reload. */
@@ -102,6 +108,13 @@ function streamWindow(stream) {
  * Only model-sourced messages sample; steps without usage still record their
  * timing with a null `tps` so the data distinguishes "no usage" from
  * "never streamed".
+ *
+ * `tps` is reported only when the decode window can carry the measurement: a
+ * window shorter than {@link MIN_DECODE_MS} reflects delivery granularity, and
+ * a rate above `maxPlausibleTps` means the provider delivered the completion in
+ * one burst rather than a stream. Those samples keep their timing and token
+ * counts and carry `unmeasurable: true`, so the rate stays derivable without
+ * polluting aggregates.
  */
 function sampleOf(sessionId, event, stepStartTime, effective) {
   const source = event.data?.message?.source
@@ -111,7 +124,8 @@ function sampleOf(sessionId, event, stepStartTime, effective) {
   const usage = event.data.usage
   const outputTokens = typeof usage?.outputTokens === 'number' ? usage.outputTokens : null
   const decodeMs = Math.max(0, window.lastTime - window.firstTime)
-  const tps = outputTokens !== null && decodeMs > 0 ? outputTokens / (decodeMs / 1000) : null
+  const rate = outputTokens !== null && decodeMs > 0 ? outputTokens / (decodeMs / 1000) : null
+  const measurable = rate !== null && decodeMs >= MIN_DECODE_MS && rate <= effective.maxPlausibleTps
   const sample = {
     time: event.time,
     provider: source.provider ?? null,
@@ -122,9 +136,10 @@ function sampleOf(sessionId, event, stepStartTime, effective) {
     decodeMs,
     outputTokens,
     inputTokens: typeof usage?.inputTokens === 'number' ? usage.inputTokens : null,
-    tps,
+    tps: measurable ? Number(rate.toFixed(2)) : null,
     interrupted: event.data.interrupted === true,
   }
+  if (rate !== null && !measurable) sample.unmeasurable = true
   if (effective.includeSessionIds) sample.sessionId = sessionId
   return sample
 }
@@ -427,6 +442,8 @@ export function apply(ctx, entryConfig) {
           }).filter((sample) => sample !== null)
           json(res, 200, JSON.stringify({
             samples: samples.length,
+            measurable: samples.filter((sample) => typeof sample.tps === 'number' && sample.tps > 0).length,
+            unmeasurable: samples.filter((sample) => sample.unmeasurable === true).length,
             oldest: samples[0]?.time ?? null,
             newest: samples[samples.length - 1]?.time ?? null,
             fileBytes: await store.fileSize(),
@@ -434,6 +451,7 @@ export function apply(ctx, entryConfig) {
               maxFileBytes: effective.maxFileBytes,
               maxAgeDays: effective.maxAgeDays,
               sampleMinIntervalMs: effective.sampleMinIntervalMs,
+              maxPlausibleTps: effective.maxPlausibleTps,
             },
             models: summarize(samples),
           }))

@@ -98,7 +98,7 @@ console.log('4. csv: header ok —', csv.body.startsWith('time_iso,model,provide
 
 // 5. summary route.
 const summary = JSON.parse((await call('/dsh-tokspeed/summary.json')).body)
-console.log('5. summary: samples', summary.samples, '| models', summary.models.map(m => `${m.model}:${m.n}`).join(','), '| retention', JSON.stringify(summary.retention))
+console.log('5. summary: samples', summary.samples, '| measurable', summary.measurable, '| unmeasurable', summary.unmeasurable, '| models', summary.models.map(m => `${m.model}:${m.n}`).join(','), '| retention', JSON.stringify(summary.retention))
 
 // 6. sweep: an ancient sample is dropped, a genuinely fresh one stays.
 const { writeFile } = await import('node:fs/promises')
@@ -133,7 +133,23 @@ listeners2.get('session/event')({ id: 'secret' }, {
 })
 await sleep(100)
 const body2 = await import('node:fs/promises').then(fs => fs.readFile('/tmp/tokspeed-test-2/samples.jsonl', 'utf8'))
-console.log('7. privacy: sessionId omitted —', !body2.includes('secret'), '| tps ok (10 tokens / 5ms):', JSON.parse(body2.trim()).tps === 2000)
+const burst = JSON.parse(body2.trim())
+console.log('7. privacy: sessionId omitted —', !body2.includes('secret'), '| short window unmeasurable —', burst.tps === null && burst.unmeasurable === true)
+
+// 7b. a burst inside a long window stays unmeasurable instead of skewing aggregates.
+listeners2.get('session/event')({ id: 'secret' }, {
+  type: 'assistant/message', time: 6_000_000,
+  data: {
+    turn: 1, step: 2,
+    stream: [{ type: 'text-chunks', time0: 6_000_000, dt: [1000], texts: ['a'] }, { type: 'chunk', time: 6_001_000 }],
+    usage: { inputTokens: 5, outputTokens: 900 },
+    message: { source: { kind: 'model', provider: 'p', model: 'm' } },
+  },
+})
+await sleep(150)
+const rows2 = (await import('node:fs/promises').then(fs => fs.readFile('/tmp/tokspeed-test-2/samples.jsonl', 'utf8'))).trim().split('\n').map((line) => JSON.parse(line))
+const overCeiling = rows2[rows2.length - 1]
+console.log('7b. over-ceiling rate (900 tok/s) unmeasurable —', overCeiling.tps === null && overCeiling.unmeasurable === true, '| timing kept —', overCeiling.decodeMs === 1000 && overCeiling.outputTokens === 900)
 
 console.log('errors during run:', errors.length, errors.join(' | ') || '(none)')
 

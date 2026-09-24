@@ -48,7 +48,8 @@ window.__ModuleLoader__.load({
         colQ3: 'Q3',
         colMin: 'min',
         colMax: 'max',
-        footer: 'Retention: ≤{mb} MB · ≤{days} days · ≥{interval}s between samples — {n} samples, oldest {date} · {kb} KB',
+        footer: 'Retention: ≤{mb} MB · ≤{days} days · ≥{interval}s between samples — {n} samples, oldest {date} · {kb} KB · {excluded} not measurable',
+        tpsLabel: 'Credible max (tok/s)',
         settingsSummary: 'Retention settings',
         daysLabel: 'Keep days',
         mbLabel: 'Size cap (MB)',
@@ -85,7 +86,8 @@ window.__ModuleLoader__.load({
         colMin: '最小',
         colQ3: 'Q3',
         colMax: '最大',
-        footer: '保留策略：≤{mb} MB · ≤{days} 天 · 采样间隔 ≥{interval}s —— 共 {n} 条，最早 {date} · 当前 {kb} KB',
+        footer: '保留策略：≤{mb} MB · ≤{days} 天 · 采样间隔 ≥{interval}s —— 共 {n} 条，最早 {date} · 当前 {kb} KB · {excluded} 条不可测',
+        tpsLabel: '可信上限 (tok/s)',
         settingsSummary: '保留设置',
         daysLabel: '保留天数',
         mbLabel: '大小上限 (MB)',
@@ -450,6 +452,7 @@ window.__ModuleLoader__.load({
               mb: String(Math.round(config.maxFileBytes / 1_048_576)),
               days: String(config.maxAgeDays),
               interval: String(Math.round(config.sampleMinIntervalMs / 1000)),
+              tps: config.maxPlausibleTps === undefined ? '' : String(config.maxPlausibleTps),
             })
           })
           .catch(() => {})
@@ -465,6 +468,7 @@ window.__ModuleLoader__.load({
             maxFileBytes: Math.max(0, Number(settings.mb) || 0) * 1_048_576,
             maxAgeDays: Math.max(0, Number(settings.days) || 0),
             sampleMinIntervalMs: Math.max(0, Number(settings.interval) || 0) * 1000,
+            ...(settings.tps === '' ? {} : { maxPlausibleTps: Math.max(1, Number(settings.tps) || 500) }),
           }),
         })
           .then((response) => {
@@ -555,6 +559,7 @@ window.__ModuleLoader__.load({
           n: state.summary.samples,
           date: state.summary.oldest !== null ? shortTime(state.summary.oldest) : '—',
           kb: String(Math.round(state.summary.fileBytes / 1024)),
+          excluded: String(state.summary.unmeasurable ?? 0),
         })),
         settings !== null && h('details', { key: 'settings', className: 'tps-card', style: { marginTop: 12 } }, [
           h('summary', { key: 'summary', className: 'tps-card-title', style: { cursor: 'pointer' } }, translate('settingsSummary')),
@@ -562,6 +567,7 @@ window.__ModuleLoader__.load({
             [translate('daysLabel'), 'days'],
             [translate('mbLabel'), 'mb'],
             [translate('intervalLabel'), 'interval'],
+            [translate('tpsLabel'), 'tps'],
           ].map(([label, key]) => h('label', { key, style: { display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, opacity: .85 } }, [
             label,
             h('input', {

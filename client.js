@@ -137,13 +137,37 @@ window.__ModuleLoader__.load({
     /* ---------- data helpers ---------- */
 
     /** Parse the JSONL sample body, skipping malformed lines. */
-    function parseSamples(text) {
+    /** Decode windows shorter than this measure delivery granularity, not decoding. */
+    const MIN_DECODE_MS = 250
+    /** Fallback ceiling on a credible decode rate (tok/s) until the Host reports its own. */
+    const DEFAULT_MAX_PLAUSIBLE_TPS = 500
+
+    /**
+     * Re-derive one row's rate under the measurability rule, so rows recorded
+     * before the Host applied it cannot skew the charts: a provider that
+     * delivers a buffered completion in one burst yields a window far shorter
+     * than the decode time, and the quotient is meaningless.
+     */
+    function measuredTps(row, maxPlausibleTps) {
+      const decodeMs = typeof row.decodeMs === 'number' ? row.decodeMs : 0
+      if (typeof row.outputTokens !== 'number' || decodeMs <= 0) return null
+      const rate = row.outputTokens / (decodeMs / 1000)
+      return decodeMs >= MIN_DECODE_MS && rate <= maxPlausibleTps ? Number(rate.toFixed(2)) : null
+    }
+
+    function parseSamples(text, maxPlausibleTps) {
       const samples = []
       for (const line of text.split('\n')) {
         if (line.trim() === '') continue
         try {
           const row = JSON.parse(line)
-          if (typeof row?.time === 'number') samples.push(row)
+          if (typeof row?.time !== 'number') continue
+          const tps = measuredTps(row, maxPlausibleTps)
+          samples.push({
+            ...row,
+            tps,
+            unmeasurable: tps === null && typeof row.outputTokens === 'number' && (row.decodeMs ?? 0) > 0,
+          })
         } catch {
           // A torn final line or foreign content must not break the whole panel.
         }
@@ -417,6 +441,7 @@ window.__ModuleLoader__.load({
       const [state, setState] = React.useState({ status: 'loading', samples: [], summary: null, message: null })
       const [hidden, setHidden] = React.useState(() => new Set())
       const [settings, setSettings] = React.useState(null)
+      const [ceiling, setCeiling] = React.useState(DEFAULT_MAX_PLAUSIBLE_TPS)
       const [settingsStatus, setSettingsStatus] = React.useState('idle')
       const endpoints = typeof window !== 'undefined' && window.__DSH_TOKSPEED__
       const url = endpoints?.url
@@ -439,15 +464,16 @@ window.__ModuleLoader__.load({
             ? fetch(summaryUrl, { cache: 'no-store' }).then((response) => response.ok ? response.json() : null).catch(() => null)
             : Promise.resolve(null),
         ])
-          .then(([text, summary]) => setState({ status: 'ready', samples: parseSamples(text), summary, message: null }))
+          .then(([text, summary]) => setState({ status: 'ready', samples: parseSamples(text, ceiling), summary, message: null }))
           .catch((error) => setState({ status: 'error', samples: [], summary: null, message: String(error) }))
-      }, [url, summaryUrl])
+      }, [url, summaryUrl, ceiling])
       const loadSettings = React.useCallback(() => {
         if (typeof configUrl !== 'string') return
         fetch(configUrl, { cache: 'no-store' })
           .then((response) => response.ok ? response.json() : null)
           .then((config) => {
             if (config === null) return
+            setCeiling(typeof config.maxPlausibleTps === 'number' ? config.maxPlausibleTps : DEFAULT_MAX_PLAUSIBLE_TPS)
             setSettings({
               mb: String(Math.round(config.maxFileBytes / 1_048_576)),
               days: String(config.maxAgeDays),
@@ -559,7 +585,7 @@ window.__ModuleLoader__.load({
           n: state.summary.samples,
           date: state.summary.oldest !== null ? shortTime(state.summary.oldest) : '—',
           kb: String(Math.round(state.summary.fileBytes / 1024)),
-          excluded: String(state.summary.unmeasurable ?? 0),
+          excluded: String(state.samples.filter((sample) => sample.unmeasurable).length),
         })),
         settings !== null && h('details', { key: 'settings', className: 'tps-card', style: { marginTop: 12 } }, [
           h('summary', { key: 'summary', className: 'tps-card-title', style: { cursor: 'pointer' } }, translate('settingsSummary')),

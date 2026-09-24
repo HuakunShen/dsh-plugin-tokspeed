@@ -11,7 +11,7 @@
  */
 
 window.__ModuleLoader__.load({
-  id: '@local/dsh-tokspeed',
+  id: 'dsh-plugin-tokspeed',
   factory(require) {
     const React = require('react')
     const h = React.createElement

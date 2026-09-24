@@ -1,0 +1,54 @@
+# Publishes dsh-plugin-tokspeed to the npm registry through npm Trusted
+# Publishing: the OIDC token minted by GitHub Actions identifies this
+# repository against the trusted publisher configured on npmjs.com, so no npm
+# token secret is needed. Requires `permissions.id-token: write`.
+#
+# npm side (package → Settings → Trusted Publisher) must name this repository
+# and this workflow filename, with the "Allow npm publish" action enabled —
+# leaving it unchecked only permits `npm stage publish`, which this workflow
+# does not use.
+#
+# Triggers: a GitHub Release marked as published, or a manual run
+# (Actions → publish → Run workflow). Bump `version` in package.json first:
+# npm rejects a version that already exists.
+
+name: publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org/
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify
+        run: |
+          node --check index.js
+          node --check client.js
+          node test/behavior-test.mjs
+
+      - name: Publish
+        run: npm publish
+        env:
+          NPM_CONFIG_PROVENANCE: true

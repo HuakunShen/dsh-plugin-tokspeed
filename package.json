@@ -23,7 +23,8 @@
     "client.js",
     "cordis.patch.yml",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "assets"
   ],
   "exports": {
     ".": "./index.js",

@@ -32,6 +32,8 @@ One sample per assistant step, across **all sessions** in the Host (main session
 
 The sidebar gains a gauge icon → a **Throughput** panel with five linked views over the same samples:
 
+![The throughput panel: per-model scatter over time, distribution with a normal fit, IQR box plot, hour-of-day medians, and a stats table](assets/panel.png)
+
 | View | What it answers |
 |---|---|
 | Scatter over time | When was it fast/slow? Colored per model, hover for details. |
@@ -130,7 +132,7 @@ Stop the plugin before running `recompute-tps.mjs`: it rewrites the file the rec
 记录 DeepSeek Harness 中每个模型 step 的**解码吞吐（tokens/秒）**，并在 Web UI 侧边栏面板中画图。
 
 - **记录内容**：每个 assistant step 一个点 —— `tps`（provider 精确 token 数 ÷ 解码时长）、`ttftMs`（首字等待）、模型名、token 数；覆盖主会话 / 子代理 / 工作流的全部会话
-- **面板**：时间散点图、分布直方图（含正态拟合线）、每模型 IQR 箱线图、一天内时段中位数、统计表；模型 chip 可开关/单看；响应式多栏布局
+- **面板**：时间散点图、分布直方图（含正态拟合线）、每模型 IQR 箱线图、一天内时段中位数、统计表；模型 chip 可开关/单看；响应式多栏布局（见上方截图）
 - **保留策略**：`maxFileBytes`（默认 5 MB，超限轮转最旧数据）与 `maxAgeDays`（默认 7 天，定期清扫）任一触发即自动清理；`sampleMinIntervalMs` 可限制采样频率；全部可在 Plugins 页配置
 - **数据接口**：`/dsh-tokspeed/samples.jsonl`（原始 JSONL）、`/samples.csv`（CSV）、`/summary.json`（每模型聚合 + 保留策略快照）
 - **隐私**：不记录任何对话内容，可选是否写入 sessionId

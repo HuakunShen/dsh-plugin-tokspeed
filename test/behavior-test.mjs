@@ -43,6 +43,10 @@ const config = mod.Config({
   dataDir: '/tmp/tokspeed-test',
 })
 
+const { rm } = await import('node:fs/promises')
+await rm('/tmp/tokspeed-test', { recursive: true, force: true })
+await rm('/tmp/tokspeed-test-2', { recursive: true, force: true })
+
 mod.apply(ctx, config)
 for (const effect of effects) await effect(ctx)
 console.log('routes registered:', [...routes.keys()].join(', '))

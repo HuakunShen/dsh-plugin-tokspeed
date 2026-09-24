@@ -109,11 +109,15 @@ Samples contain model/provider names, token counts, timings, and (by default) se
 
 ## Development
 
-Plain JavaScript, no build step. After editing `index.js`, reload the entry from **Settings → Plugins** (disable → enable). After editing `client.js`, reload the Web page.
+Plain JavaScript, no build step. After editing `index.js`, reload the entry from **Settings → Plugins** (disable → enable) — a Host restart is required for `index.js` changes to take effect, because Node caches the module. After editing `client.js`, reload the Web page.
 
 ```sh
 node --check index.js && node --check client.js
+node test/behavior-test.mjs          # 14 assertions against a fake Host context
+node scripts/recompute-tps.mjs       # re-derive tps in an existing samples file (backup + --dry-run)
 ```
+
+Stop the plugin before running `recompute-tps.mjs`: it rewrites the file the recorder appends to.
 
 ## License
 

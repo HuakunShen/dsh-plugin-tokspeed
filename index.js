@@ -25,6 +25,9 @@ import { join } from 'node:path'
 
 const ROUTE_SAMPLES = '/dsh-tokspeed/samples.jsonl'
 const ROUTE_CSV = '/dsh-tokspeed/samples.csv'
+
+/** Wait for the webServer service before apply, so the routes register regardless of activation order. */
+export const inject = ['webServer']
 const ROUTE_SUMMARY = '/dsh-tokspeed/summary.json'
 const ROUTE_CONFIG = '/dsh-tokspeed/config'
 

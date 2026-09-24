@@ -49,6 +49,14 @@ window.__ModuleLoader__.load({
         colMin: 'min',
         colMax: 'max',
         footer: 'Retention: ≤{mb} MB · ≤{days} days · ≥{interval}s between samples — {n} samples, oldest {date} · {kb} KB',
+        settingsSummary: 'Retention settings',
+        daysLabel: 'Keep days',
+        mbLabel: 'Size cap (MB)',
+        intervalLabel: 'Sample interval (s)',
+        save: 'Save',
+        saving: 'Saving…',
+        saved: 'Saved ✓',
+        saveFailed: 'Save failed',
       },
       zh: {
         panel: '吞吐速度',
@@ -75,8 +83,17 @@ window.__ModuleLoader__.load({
         colQ1: 'Q1',
         colQ3: 'Q3',
         colMin: '最小',
+        colQ3: 'Q3',
         colMax: '最大',
         footer: '保留策略：≤{mb} MB · ≤{days} 天 · 采样间隔 ≥{interval}s —— 共 {n} 条，最早 {date} · 当前 {kb} KB',
+        settingsSummary: '保留设置',
+        daysLabel: '保留天数',
+        mbLabel: '大小上限 (MB)',
+        intervalLabel: '采样间隔 (秒)',
+        save: '保存',
+        saving: '保存中…',
+        saved: '已保存 ✓',
+        saveFailed: '保存失败',
       },
     }
 
@@ -397,10 +414,14 @@ window.__ModuleLoader__.load({
       const translate = props?.t ?? boundT
       const [state, setState] = React.useState({ status: 'loading', samples: [], summary: null, message: null })
       const [hidden, setHidden] = React.useState(() => new Set())
+      const [settings, setSettings] = React.useState(null)
+      const [settingsStatus, setSettingsStatus] = React.useState('idle')
       const endpoints = typeof window !== 'undefined' && window.__DSH_TOKSPEED__
       const url = endpoints?.url
       const summaryUrl = endpoints?.summaryUrl
         ?? (typeof url === 'string' ? url.replace('samples.jsonl', 'summary.json') : undefined)
+      const configUrl = endpoints?.configUrl
+        ?? (typeof url === 'string' ? url.replace('samples.jsonl', 'config') : undefined)
       const load = React.useCallback(() => {
         if (typeof url !== 'string') {
           setState({ status: 'error', samples: [], summary: null, message: 'reload' })
@@ -419,7 +440,40 @@ window.__ModuleLoader__.load({
           .then(([text, summary]) => setState({ status: 'ready', samples: parseSamples(text), summary, message: null }))
           .catch((error) => setState({ status: 'error', samples: [], summary: null, message: String(error) }))
       }, [url, summaryUrl])
-      React.useEffect(() => { load() }, [load])
+      const loadSettings = React.useCallback(() => {
+        if (typeof configUrl !== 'string') return
+        fetch(configUrl, { cache: 'no-store' })
+          .then((response) => response.ok ? response.json() : null)
+          .then((config) => {
+            if (config === null) return
+            setSettings({
+              mb: String(Math.round(config.maxFileBytes / 1_048_576)),
+              days: String(config.maxAgeDays),
+              interval: String(Math.round(config.sampleMinIntervalMs / 1000)),
+            })
+          })
+          .catch(() => {})
+      }, [configUrl])
+      React.useEffect(() => { load(); loadSettings() }, [load, loadSettings])
+      const saveSettings = () => {
+        if (typeof configUrl !== 'string' || settings === null) return
+        setSettingsStatus('saving')
+        fetch(configUrl, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            maxFileBytes: Math.max(0, Number(settings.mb) || 0) * 1_048_576,
+            maxAgeDays: Math.max(0, Number(settings.days) || 0),
+            sampleMinIntervalMs: Math.max(0, Number(settings.interval) || 0) * 1000,
+          }),
+        })
+          .then((response) => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}`)
+            setSettingsStatus('saved')
+            load()
+          })
+          .catch(() => setSettingsStatus('error'))
+      }
 
       const allModels = modelStats(state.samples)
       const models = allModels.filter((entry) => !hidden.has(entry.name))
@@ -502,6 +556,25 @@ window.__ModuleLoader__.load({
           date: state.summary.oldest !== null ? shortTime(state.summary.oldest) : '—',
           kb: String(Math.round(state.summary.fileBytes / 1024)),
         })),
+        settings !== null && h('details', { key: 'settings', className: 'tps-card', style: { marginTop: 12 } }, [
+          h('summary', { key: 'summary', className: 'tps-card-title', style: { cursor: 'pointer' } }, translate('settingsSummary')),
+          h('div', { key: 'form', style: { display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end', marginTop: 6 } }, [
+            [translate('daysLabel'), 'days'],
+            [translate('mbLabel'), 'mb'],
+            [translate('intervalLabel'), 'interval'],
+          ].map(([label, key]) => h('label', { key, style: { display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, opacity: .85 } }, [
+            label,
+            h('input', {
+              type: 'number', min: 0, value: settings[key],
+              onChange: (event) => setSettings((current) => ({ ...current, [key]: event.target.value })),
+              style: { width: 110, padding: '4px 8px', fontSize: 13, borderRadius: 6, border: '1px solid rgba(128,128,128,.4)', background: 'transparent', color: 'inherit' },
+            }),
+          ]))),
+          h('button', { className: 'tps-btn', style: { marginLeft: 0 }, onClick: saveSettings },
+            settingsStatus === 'saving' ? translate('saving') : translate('save')),
+          settingsStatus === 'saved' && h('span', { style: { fontSize: 12, opacity: .6 } }, translate('saved')),
+          settingsStatus === 'error' && h('span', { style: { fontSize: 12, opacity: .7 } }, translate('saveFailed')),
+        ]),
       ])
     }
 

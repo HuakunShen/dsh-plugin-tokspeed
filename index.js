@@ -10,8 +10,12 @@
  * Samples append as JSON lines under the data directory. Retention is bounded
  * two ways, whichever hits first: file size (oldest lines dropped with
  * hysteresis) and sample age (periodic sweep). Optional rate limiting records
- * at most one sample per interval. Read-only routes serve the raw JSONL, a CSV
- * projection, and a JSON summary.
+ * at most one sample per interval.
+ *
+ * Settings follow the voice-plugin pattern: a user-editable config.json next
+ * to the samples, read and written through same-origin routes. Precedence is
+ * schema defaults <- entry `config:` block <- user config.json (the panel
+ * writes the file). Changes apply live; `dataDir` still requires a reload.
  */
 
 import z from '@deepseek-ai/schemastery'
@@ -22,6 +26,7 @@ import { join } from 'node:path'
 const ROUTE_SAMPLES = '/dsh-tokspeed/samples.jsonl'
 const ROUTE_CSV = '/dsh-tokspeed/samples.csv'
 const ROUTE_SUMMARY = '/dsh-tokspeed/summary.json'
+const ROUTE_CONFIG = '/dsh-tokspeed/config'
 
 /** Default size cap: 5 MiB of JSONL before the oldest lines rotate out. */
 const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024
@@ -30,7 +35,7 @@ const ROTATE_TARGET_FRACTION = 0.75
 /** Default sample age cap in days. */
 const DEFAULT_MAX_AGE_DAYS = 7
 
-/** Plugin configuration; every field is optional and validated by the Loader. */
+/** Validated settings schema; every field is optional. The Loader applies it to entry `config:` blocks. */
 export const Config = z.object({
   /** File size cap in bytes; the oldest lines rotate out. 0 disables the cap. */
   maxFileBytes: z.natural().default(DEFAULT_MAX_FILE_BYTES),
@@ -42,15 +47,25 @@ export const Config = z.object({
   sweepIntervalMinutes: z.natural().min(1).default(60),
   /** Write sessionId into each sample; disable on shared data directories. */
   includeSessionIds: z.boolean().default(true),
-  /** Directory for samples.jsonl; empty uses `<dsh home>/tokspeed`. */
+  /** Directory for samples.jsonl; empty uses `<dsh home>/tokspeed`. Changing it requires a reload. */
   dataDir: z.string().default(''),
 })
 
 /** Resolve the sample file location: an explicit dataDir is used verbatim; the default is the DSH home. */
-function samplesFile(config) {
-  if (config.dataDir !== '') return join(config.dataDir, 'samples.jsonl')
+function samplesFile(effective) {
+  if (effective.dataDir !== '') return join(effective.dataDir, 'samples.jsonl')
   const base = process.env['DSH_PROFILE_DIR'] || join(homedir(), '.dsh')
   return join(base, 'tokspeed', 'samples.jsonl')
+}
+
+/** Load the user's config.json, if any; malformed files fall back to defaults with a warning. */
+async function readUserConfig(path, logger) {
+  try {
+    return JSON.parse(await readFile(path, 'utf8'))
+  } catch (error) {
+    if (error?.code !== 'ENOENT') logger.warn(`tokspeed: config.json unreadable (${String(error?.message ?? error)}); using defaults`)
+    return {}
+  }
 }
 
 /**
@@ -85,7 +100,7 @@ function streamWindow(stream) {
  * timing with a null `tps` so the data distinguishes "no usage" from
  * "never streamed".
  */
-function sampleOf(sessionId, event, stepStartTime, config) {
+function sampleOf(sessionId, event, stepStartTime, effective) {
   const source = event.data?.message?.source
   if (source?.kind !== 'model') return null
   const window = streamWindow(event.data.stream)
@@ -107,7 +122,7 @@ function sampleOf(sessionId, event, stepStartTime, config) {
     tps,
     interrupted: event.data.interrupted === true,
   }
-  if (config.includeSessionIds) sample.sessionId = sessionId
+  if (effective.includeSessionIds) sample.sessionId = sessionId
   return sample
 }
 
@@ -192,7 +207,7 @@ function createFileStore(file) {
   }
 
   /** Sweep samples older than the age cap, then enforce the size cap. */
-  const sweep = async (config) => {
+  const sweep = async (effective) => {
     let body = ''
     try {
       body = await readFile(file, 'utf8')
@@ -201,8 +216,8 @@ function createFileStore(file) {
     }
     let lines = parseLines(body)
     const before = lines.length
-    if (config.maxAgeDays > 0) {
-      const cutoff = Date.now() - config.maxAgeDays * 86_400_000
+    if (effective.maxAgeDays > 0) {
+      const cutoff = Date.now() - effective.maxAgeDays * 86_400_000
       lines = lines.filter((line) => {
         try {
           return JSON.parse(line).time >= cutoff
@@ -211,9 +226,9 @@ function createFileStore(file) {
         }
       })
     }
-    if (config.maxFileBytes > 0) {
+    if (effective.maxFileBytes > 0) {
       let total = lines.reduce((acc, line) => acc + Buffer.byteLength(line) + 1, 0)
-      const target = Math.floor(config.maxFileBytes * ROTATE_TARGET_FRACTION)
+      const target = Math.floor(effective.maxFileBytes * ROTATE_TARGET_FRACTION)
       while (total > target && lines.length > 0) {
         total -= Buffer.byteLength(lines[0]) + 1
         lines.shift()
@@ -287,19 +302,29 @@ function summarize(samples) {
 }
 
 /**
- * Bundle entry: start the recorder, retention, the read-only routes, and the
- * index injection. Registrations ride the plugin fiber and unwind with it.
+ * Bundle entry: start the recorder, retention, the read-only data routes, the
+ * settings routes, and the index injection. Registrations ride the plugin
+ * fiber and unwind with it.
  */
-export function apply(ctx, config) {
-  const file = samplesFile(config)
+export function apply(ctx, entryConfig) {
+  // Precedence: schema defaults <- deployment entry config <- user config.json.
+  const effective = Config(entryConfig ?? {})
+  const dataDir = effective.dataDir !== '' ? effective.dataDir : join(process.env['DSH_PROFILE_DIR'] || join(homedir(), '.dsh'), 'tokspeed')
+  const file = join(dataDir, 'samples.jsonl')
+  const configPath = join(dataDir, 'config.json')
   const store = createFileStore(file)
   const stepStarts = new Map()
   let lastRecordedAt = 0
+  let sweepTimer
+  let rearmSweep = () => {}
 
   ctx.effect(async () => {
     try {
-      await mkdir(join(file, '..'), { recursive: true })
-      await store.initialize(config.maxAgeDays)
+      await mkdir(dataDir, { recursive: true })
+      const user = await readUserConfig(configPath, ctx.logger)
+      // dataDir cannot come from the file: the file lives inside it.
+      Object.assign(effective, Config({ ...effective, ...user }), { dataDir: effective.dataDir })
+      await store.initialize(effective.maxAgeDays)
     } catch (error) {
       ctx.logger.error('tokspeed: initialize failed', error)
     }
@@ -312,26 +337,35 @@ export function apply(ctx, config) {
       return
     }
     if (event.type !== 'assistant/message') return
-    if (typeof event.time !== 'number' || event.time - lastRecordedAt < config.sampleMinIntervalMs) return
-    const sample = sampleOf(session.id, event, stepStarts.get(session.id), config)
+    if (typeof event.time !== 'number' || event.time - lastRecordedAt < effective.sampleMinIntervalMs) return
+    const sample = sampleOf(session.id, event, stepStarts.get(session.id), effective)
     if (sample === null) return
     lastRecordedAt = event.time
     const line = `${JSON.stringify(sample)}\n`
-    void store.enqueue(() => store.append(line, config.maxFileBytes))
+    void store.enqueue(() => store.append(line, effective.maxFileBytes))
       .catch((error) => { ctx.logger.error('tokspeed: sample append failed', error) })
   })
   ctx.on('session/disposed', (session) => { stepStarts.delete(session.id) })
 
   ctx.effect(() => {
-    const timer = setInterval(() => {
-      void store.enqueue(() => store.sweep(config))
-        .catch((error) => { ctx.logger.error('tokspeed: sweep failed', error) })
-    }, config.sweepIntervalMinutes * 60_000)
-    return () => { clearInterval(timer) }
+    const arm = () => {
+      if (sweepTimer !== undefined) clearInterval(sweepTimer)
+      sweepTimer = setInterval(() => {
+        void store.enqueue(() => store.sweep(effective))
+          .catch((error) => { ctx.logger.error('tokspeed: sweep failed', error) })
+      }, effective.sweepIntervalMinutes * 60_000)
+    }
+    arm()
+    rearmSweep = arm
+    return () => { clearInterval(sweepTimer) }
   }, 'tokspeed: retention sweep')
 
   ctx.on('webserver/index-inject', (table) => {
-    table.push({ kind: 'global', name: '__DSH_TOKSPEED__', value: { url: ROUTE_SAMPLES, summaryUrl: ROUTE_SUMMARY } })
+    table.push({
+      kind: 'global',
+      name: '__DSH_TOKSPEED__',
+      value: { url: ROUTE_SAMPLES, summaryUrl: ROUTE_SUMMARY, configUrl: ROUTE_CONFIG },
+    })
   })
 
   const webServer = ctx.get('webServer')
@@ -340,30 +374,29 @@ export function apply(ctx, config) {
     return
   }
   ctx.effect(() => {
+    const json = (res, code, payload, type = 'application/json') => {
+      res.writeHead(code, { 'content-type': `${type}; charset=utf-8`, 'cache-control': 'no-store' })
+      res.end(payload)
+    }
+    const notAllowed = (res) => {
+      res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8' })
+      res.end('method not allowed')
+    }
     const disposers = [
       webServer.register({
         kind: 'exact',
         path: ROUTE_SAMPLES,
         async handler(req, res) {
-          if (req.method !== 'GET') {
-            res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8' })
-            res.end('method not allowed')
-            return
-          }
+          if (req.method !== 'GET') return notAllowed(res)
           const body = await store.readAll()
-          res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
-          res.end(body)
+          json(res, 200, body, 'text/plain')
         },
       }),
       webServer.register({
         kind: 'exact',
         path: ROUTE_CSV,
         async handler(req, res) {
-          if (req.method !== 'GET') {
-            res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8' })
-            res.end('method not allowed')
-            return
-          }
+          if (req.method !== 'GET') return notAllowed(res)
           const body = await store.readAll()
           const rows = body.split('\n').filter((line) => line.trim() !== '')
           const csv = [CSV_HEADER, ...rows.map((line) => {
@@ -373,19 +406,14 @@ export function apply(ctx, config) {
               return null
             }
           }).filter((row) => row !== null)].join('\n')
-          res.writeHead(200, { 'content-type': 'text/csv; charset=utf-8', 'cache-control': 'no-store' })
-          res.end(`${csv}\n`)
+          json(res, 200, `${csv}\n`, 'text/csv')
         },
       }),
       webServer.register({
         kind: 'exact',
         path: ROUTE_SUMMARY,
         async handler(req, res) {
-          if (req.method !== 'GET') {
-            res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8' })
-            res.end('method not allowed')
-            return
-          }
+          if (req.method !== 'GET') return notAllowed(res)
           const body = await store.readAll()
           const samples = body.split('\n').filter((line) => line.trim() !== '').map((line) => {
             try {
@@ -394,20 +422,58 @@ export function apply(ctx, config) {
               return null
             }
           }).filter((sample) => sample !== null)
-          const summary = {
+          json(res, 200, JSON.stringify({
             samples: samples.length,
             oldest: samples[0]?.time ?? null,
             newest: samples[samples.length - 1]?.time ?? null,
             fileBytes: await store.fileSize(),
             retention: {
-              maxFileBytes: config.maxFileBytes,
-              maxAgeDays: config.maxAgeDays,
-              sampleMinIntervalMs: config.sampleMinIntervalMs,
+              maxFileBytes: effective.maxFileBytes,
+              maxAgeDays: effective.maxAgeDays,
+              sampleMinIntervalMs: effective.sampleMinIntervalMs,
             },
             models: summarize(samples),
+          }))
+        },
+      }),
+      webServer.register({
+        kind: 'exact',
+        path: ROUTE_CONFIG,
+        async handler(req, res) {
+          if (req.method === 'GET') {
+            json(res, 200, JSON.stringify(effective))
+            return
           }
-          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-          res.end(JSON.stringify(summary))
+          if (req.method !== 'POST') return notAllowed(res)
+          let chunks = ''
+          for await (const chunk of req) chunks += chunk
+          let patch
+          try {
+            patch = JSON.parse(chunks || '{}')
+          } catch {
+            json(res, 400, JSON.stringify({ error: 'body must be JSON' }))
+            return
+          }
+          // Moving the data location live would strand the store; reload to change it.
+          delete patch.dataDir
+          let next
+          try {
+            next = Config({ ...effective, ...patch })
+          } catch (error) {
+            json(res, 400, JSON.stringify({ error: String(error?.message ?? error) }))
+            return
+          }
+          Object.assign(effective, next)
+          try {
+            const user = await readUserConfig(configPath, ctx.logger)
+            await writeFile(configPath, `${JSON.stringify({ ...user, ...patch }, null, 2)}\n`, 'utf8')
+          } catch (error) {
+            ctx.logger.error('tokspeed: config write failed', error)
+            json(res, 500, JSON.stringify({ error: 'failed to persist config' }))
+            return
+          }
+          rearmSweep()
+          json(res, 200, JSON.stringify(effective))
         },
       }),
     ]

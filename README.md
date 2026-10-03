@@ -1,5 +1,12 @@
 # dsh-plugin-tokspeed
 
+> **Archived — succeeded by [dsh-plugin-stats](https://github.com/HuakunShen/dsh-plugin-stats).**
+> This plugin only tracked decode throughput. `dsh-plugin-stats` is a TypeScript
+> rewrite and a strict superset: throughput + verbosity, token totals, cost in USD
+> (models.dev pricing), tool-call stats, and session activity — with a modular
+> pnpm workspace (`@dsh-stats/core`, `@dsh-stats/pricing`) reusable by other projects.
+> New installs should use `dsh-plugin-stats`. This repository is read-only.
+
 A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin that records **per-step model decode throughput (tokens/second)** and charts it in the Web UI — so you can see how fast each model actually streams, how it varies by hour of day, and when the provider is having a slow day.
 
 ```text

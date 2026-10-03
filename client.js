@@ -34,6 +34,8 @@ window.__ModuleLoader__.load({
         samplesCount: '{n} samples',
         shown: '{shown}/{n} shown',
         overTime: 'Over time (tok/s, colored by model)',
+        zoomHint: 'drag a box to zoom (x & y) · double-click to reset',
+        resetZoom: 'reset',
         hist: 'Distribution (tok/s, normal fit overlay)',
         box: 'Per-model spread (IQR box plot)',
         hourly: 'By hour of day (median tok/s)',
@@ -54,6 +56,13 @@ window.__ModuleLoader__.load({
         daysLabel: 'Keep days',
         mbLabel: 'Size cap (MB)',
         intervalLabel: 'Sample interval (s)',
+        verbosity: 'Verbosity (per assistant step, medians)',
+        verbosityHint: 'think% = reasoning tokens ÷ output tokens (* = estimated from streamed reasoning characters when the provider reports no reasoningTokens); out/in = output ÷ input tokens (input is the whole context, so treat it as a rough reference).',
+        colOutTok: 'output tok',
+        colThinkShare: 'think %',
+        colText: 'text chars',
+        colThink: 'think chars',
+        colOutIn: 'out/in',
         save: 'Save',
         saving: 'Saving…',
         saved: 'Saved ✓',
@@ -71,6 +80,8 @@ window.__ModuleLoader__.load({
         samplesCount: '{n} 个采样',
         shown: '显示 {shown}/{n}',
         overTime: '时间分布（tok/s，按模型着色）',
+        zoomHint: '拖框缩放（x/y 同时）· 双击还原',
+        resetZoom: '重置',
         hist: '分布直方图（tok/s，含正态拟合参考线）',
         box: '每模型离散度（IQR 箱线图）',
         hourly: '一天内时段（中位 tok/s）',
@@ -92,6 +103,13 @@ window.__ModuleLoader__.load({
         daysLabel: '保留天数',
         mbLabel: '大小上限 (MB)',
         intervalLabel: '采样间隔 (秒)',
+        verbosity: '啰嗦度（每个 assistant step，中位数）',
+        verbosityHint: 'think% = 思考 tokens ÷ 输出 tokens（* 表示服务商未上报 reasoningTokens，按流式 reasoning 字符估算）；out/in = 输出 ÷ 输入 tokens（输入是整个会话上下文，仅作粗参考）。',
+        colOutTok: '输出 tok',
+        colThinkShare: '思考占比',
+        colText: '正文字符',
+        colThink: '思考字符',
+        colOutIn: '输出/输入',
         save: '保存',
         saving: '保存中…',
         saved: '已保存 ✓',
@@ -130,6 +148,17 @@ window.__ModuleLoader__.load({
 .tps-table th, .tps-table td { text-align: right; padding: 5px 10px; border-bottom: 1px solid rgba(128,128,128,.18); }
 .tps-table th:first-child, .tps-table td:first-child { text-align: left; }
 .tps-table th { opacity: .6; font-weight: 600; }
+.tps-chartbox { position: relative; }
+.tps-chartbox svg { cursor: crosshair; }
+.tps-tip { position: absolute; pointer-events: none; z-index: 6; white-space: nowrap;
+  background: rgba(24,24,27,.94); color: #f4f4f5; border: 1px solid rgba(255,255,255,.14);
+  border-radius: 7px; padding: 5px 10px; font-size: 11.5px; line-height: 1.55;
+  box-shadow: 0 4px 16px rgba(0,0,0,.4); }
+.tps-tip div:first-child { font-weight: 600; }
+.tps-zoombar { display: flex; gap: 10px; align-items: center; font-size: 11px; opacity: .55; margin-top: 3px; }
+.tps-zoomreset { border: 1px solid rgba(128,128,128,.45); background: transparent; color: inherit;
+  border-radius: 5px; font-size: 11px; padding: 1px 10px; cursor: pointer; }
+.tps-zoomreset:hover { border-color: currentColor; }
 .tps-table td:first-child .tps-model { display: inline-flex; align-items: center; gap: 6px; }
 @media (max-width: 720px) { .tps-root { padding: 12px 10px 24px; } }
 `
@@ -225,6 +254,49 @@ window.__ModuleLoader__.load({
       })
     }
 
+    /**
+     * Verbosity fold per model. Thinking share prefers provider-reported
+     * reasoningTokens/outputTokens; when absent it falls back to the ratio of
+     * streamed reasoning characters (`estimated: true`). out/in is output over
+     * the full input context — a rough inflation gauge only.
+     */
+    function verbosityStats(samples) {
+      const byModel = new Map()
+      for (const sample of samples) {
+        const name = modelName(sample)
+        let entry = byModel.get(name)
+        if (entry === undefined) {
+          entry = { name, color: '#888888', outTok: [], text: [], think: [], outIn: [], share: [], estimatedShare: 0 }
+          byModel.set(name, entry)
+        }
+        if (typeof sample.outputTokens === 'number' && sample.outputTokens > 0) entry.outTok.push(sample.outputTokens)
+        if (typeof sample.textChars === 'number') entry.text.push(sample.textChars)
+        if (typeof sample.reasoningChars === 'number' && sample.reasoningChars > 0) entry.think.push(sample.reasoningChars)
+        if (typeof sample.outputTokens === 'number' && typeof sample.inputTokens === 'number' && sample.inputTokens > 0) {
+          entry.outIn.push(sample.outputTokens / sample.inputTokens)
+        }
+        if (typeof sample.reasoningTokens === 'number' && typeof sample.outputTokens === 'number' && sample.outputTokens > 0) {
+          entry.share.push(sample.reasoningTokens / sample.outputTokens)
+        } else if (typeof sample.reasoningChars === 'number' && ((sample.reasoningChars ?? 0) + (sample.textChars ?? 0)) > 0) {
+          const total = (sample.reasoningChars ?? 0) + (sample.textChars ?? 0)
+          if (total > 0 && sample.reasoningChars > 0) {
+            entry.share.push(sample.reasoningChars / total)
+            entry.estimatedShare += 1
+          }
+        }
+      }
+      return [...byModel.values()].map((entry) => ({
+        name: entry.name,
+        n: entry.outTok.length,
+        medOutput: quantile([...entry.outTok].sort((a, b) => a - b), 0.5),
+        medText: quantile([...entry.text].sort((a, b) => a - b), 0.5),
+        medThink: quantile([...entry.think].sort((a, b) => a - b), 0.5),
+        medOutIn: quantile([...entry.outIn].sort((a, b) => a - b), 0.5),
+        medShare: quantile([...entry.share].sort((a, b) => a - b), 0.5),
+        shareEstimated: entry.share.length > 0 && entry.estimatedShare === entry.share.length,
+      }))
+    }
+
     function formatTps(value) {
       if (value === null || value === undefined) return '—'
       return value >= 100 ? String(Math.round(value)) : value.toFixed(1)
@@ -241,24 +313,128 @@ window.__ModuleLoader__.load({
 
     /* ---------- charts ---------- */
 
-    /** Scatter of every visible sample with a tps reading over wall time. */
+    /** Anchored hover bubble; flips horizontally when the pointer nears the right edge. */
+    function Tip({ tip }) {
+      if (tip === null || tip.lines.length === 0) return null
+      const style = { top: tip.py, left: tip.px, transform: tip.flip ? 'translate(calc(-100% - 10px), -108%)' : 'translate(10px, -108%)' }
+      return h('div', { className: 'tps-tip', style }, tip.lines.map((line, index) => h('div', { key: index }, line)))
+    }
+
+    /** Chart wrapper pairing the SVG with the tooltip layer. */
+    function Chart({ tip, children }) {
+      return h('div', { className: 'tps-chartbox' }, [children, h(Tip, { key: 'tip', tip })])
+    }
+
+    /** Pointer position → view-box units, css pixels (for the tooltip), and edge flag. */
+    function svgPos(event, width, height) {
+      const svg = event.currentTarget.ownerSVGElement ?? event.currentTarget
+      const rect = svg.getBoundingClientRect()
+      const px = event.clientX - rect.left
+      return {
+        vx: (px / rect.width) * width,
+        vy: ((event.clientY - rect.top) / rect.height) * height,
+        px,
+        py: event.clientY - rect.top,
+        sx: rect.width / width,
+        sy: rect.height / height,
+        flip: px > rect.width * 0.6,
+      }
+    }
+
+    /**
+     * Scatter of every visible sample with a tps reading over wall time.
+     * Interactive: hover snaps to the nearest point with a tooltip; dragging a
+     * rectangle zooms both axes into that window (outliers included); a
+     * double-click or the reset chip restores the full domain.
+     */
     function ScatterChart({ samples, models, t }) {
-      const points = samples.filter((sample) => typeof sample.tps === 'number' && sample.tps > 0)
-      if (points.length === 0) return null
+      const [zoom, setZoom] = React.useState(null)
+      const [tip, setTip] = React.useState(null)
+      const [sel, setSel] = React.useState(null)
+      const dragRef = React.useRef(null)
+      const all = samples.filter((sample) => typeof sample.tps === 'number' && sample.tps > 0)
+      if (all.length === 0) return null
       const colorOf = new Map(models.map((entry) => [entry.name, entry.color]))
       const width = 920
       const height = 260
       const m = { left: 46, right: 14, top: 12, bottom: 26 }
       const innerWidth = width - m.left - m.right
       const innerHeight = height - m.top - m.bottom
-      const t0 = points[0].time
-      const t1 = Math.max(points[points.length - 1].time, t0 + 60_000)
-      const vMax = Math.max(...points.map((sample) => sample.tps)) * 1.1
-      const x = (time) => m.left + ((time - t0) / (t1 - t0)) * innerWidth
-      const y = (value) => m.top + innerHeight * (1 - value / vMax)
-      const yTicks = [0, 0.25, 0.5, 0.75, 1].map((fraction) => fraction * vMax)
-      const xTicks = [0, 1 / 3, 2 / 3, 1].map((fraction) => t0 + fraction * (t1 - t0))
-      return h('svg', { className: 'tps-chart', viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': t('overTime') }, [
+      const full = {
+        t0: all[0].time,
+        t1: Math.max(all[all.length - 1].time, all[0].time + 60_000),
+        v0: 0,
+        v1: Math.max(...all.map((sample) => sample.tps)) * 1.1,
+      }
+      const dom = zoom ?? full
+      const points = all.filter((sample) =>
+        sample.time >= dom.t0 && sample.time <= dom.t1 && sample.tps >= dom.v0 && sample.tps <= dom.v1)
+      const x = (time) => m.left + ((time - dom.t0) / (dom.t1 - dom.t0)) * innerWidth
+      const y = (value) => m.top + innerHeight * (1 - (value - dom.v0) / (dom.v1 - dom.v0))
+      const xToTime = (vx) => dom.t0 + ((vx - m.left) / innerWidth) * (dom.t1 - dom.t0)
+      const yToValue = (vy) => dom.v0 + (1 - (vy - m.top) / innerHeight) * (dom.v1 - dom.v0)
+      const clamp = (value, lo, hi) => Math.min(hi, Math.max(lo, value))
+      const inPlot = (p) => p.vx >= m.left && p.vx <= width - m.right && p.vy >= m.top && p.vy <= m.top + innerHeight
+      const yTicks = [0, 0.25, 0.5, 0.75, 1].map((fraction) => dom.v0 + fraction * (dom.v1 - dom.v0))
+      const xTicks = [0, 1 / 3, 2 / 3, 1].map((fraction) => dom.t0 + fraction * (dom.t1 - dom.t0))
+      const onDown = (event) => {
+        if (event.button !== 0) return
+        const p = svgPos(event, width, height)
+        if (!inPlot(p)) return
+        dragRef.current = { start: p }
+        setTip(null)
+        setSel({ x0: p.vx, y0: p.vy, x1: p.vx, y1: p.vy })
+      }
+      const onMove = (event) => {
+        const p = svgPos(event, width, height)
+        const drag = dragRef.current
+        if (drag !== null) {
+          setSel({
+            x0: Math.min(drag.start.vx, p.vx), x1: Math.max(drag.start.vx, p.vx),
+            y0: Math.min(drag.start.vy, p.vy), y1: Math.max(drag.start.vy, p.vy),
+          })
+          return
+        }
+        if (!inPlot(p)) { setTip(null); return }
+        let best = null
+        let bestD = 30
+        for (const sample of points) {
+          const dx = (x(sample.time) - p.vx) * p.sx
+          const dy = (y(sample.tps) - p.vy) * p.sy
+          const d = Math.hypot(dx, dy)
+          if (d < bestD) { bestD = d; best = sample }
+        }
+        setTip(best === null ? null : {
+          px: p.px, py: p.py, flip: p.flip, sample: best,
+          lines: [
+            modelName(best),
+            `${formatTps(best.tps)} tok/s · ${shortTime(best.time)}`,
+            `${best.outputTokens ?? '—'} tok out · ${Math.round(best.decodeMs)} ms decode`,
+          ],
+        })
+      }
+      const onUp = (event) => {
+        const drag = dragRef.current
+        if (drag === null) return
+        dragRef.current = null
+        setSel(null)
+        const p = svgPos(event, width, height)
+        if (Math.abs(p.vx - drag.start.vx) < 12 || Math.abs(p.vy - drag.start.vy) < 12) return
+        const tA = clamp(xToTime(drag.start.vx), dom.t0, dom.t1)
+        const tB = clamp(xToTime(p.vx), dom.t0, dom.t1)
+        const vA = clamp(yToValue(drag.start.vy), dom.v0, dom.v1)
+        const vB = clamp(yToValue(p.vy), dom.v0, dom.v1)
+        setZoom({ t0: Math.min(tA, tB), t1: Math.max(tA, tB), v0: Math.min(vA, vB), v1: Math.max(vA, vB) })
+        setTip(null)
+      }
+      const onLeave = () => { dragRef.current = null; setSel(null); setTip(null) }
+      const reset = () => { setZoom(null); setTip(null) }
+      const svg = h('svg', {
+        className: 'tps-chart', viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': t('overTime'),
+        onMouseDown: onDown, onMouseMove: onMove, onMouseUp: onUp, onMouseLeave: onLeave, onDoubleClick: reset,
+      }, [
+        h('defs', { key: 'defs' }, h('clipPath', { id: 'tps-scatter-clip' },
+          h('rect', { x: m.left, y: m.top, width: innerWidth, height: innerHeight }))),
         yTicks.map((value, index) => h('g', { key: `y${index}` }, [
           h('line', { x1: m.left, x2: width - m.right, y1: y(value), y2: y(value), stroke: GRID_STROKE }),
           h('text', { x: m.left - 6, y: y(value) + 4, 'text-anchor': 'end', 'font-size': 11, fill: TICK_FILL }, formatTps(value)),
@@ -266,10 +442,28 @@ window.__ModuleLoader__.load({
         xTicks.map((time, index) => h('text', {
           key: `x${index}`, x: x(time), y: height - 8, 'text-anchor': index === 0 ? 'start' : 'middle', 'font-size': 11, fill: TICK_FILL,
         }, shortTime(time))),
-        ...points.map((sample, index) => h('circle', {
-          key: index, cx: x(sample.time), cy: y(sample.tps), r: 3.2,
-          fill: colorOf.get(modelName(sample)) ?? '#888888', 'fill-opacity': 0.8,
-        }, h('title', null, `${modelName(sample)} ${formatTps(sample.tps)} tok/s — ${shortTime(sample.time)}`))),
+        h('g', { key: 'points', 'clip-path': 'url(#tps-scatter-clip)' }, points.map((sample, index) => {
+          const hovered = tip !== null && tip.sample === sample
+          return h('circle', {
+            key: index, cx: x(sample.time), cy: y(sample.tps), r: hovered ? 4.6 : 3.2,
+            fill: colorOf.get(modelName(sample)) ?? '#888888', 'fill-opacity': hovered ? 1 : 0.8,
+            stroke: hovered ? '#f4f4f5' : 'none', 'stroke-width': 1.4,
+          })
+        })),
+        sel !== null && h('rect', {
+          key: 'sel',
+          x: Math.min(sel.x0, sel.x1), y: Math.min(sel.y0, sel.y1),
+          width: Math.abs(sel.x1 - sel.x0), height: Math.abs(sel.y1 - sel.y0),
+          fill: 'currentColor', 'fill-opacity': 0.08,
+          stroke: 'currentColor', 'stroke-opacity': 0.7, 'stroke-dasharray': '4 3',
+        }),
+      ])
+      return h(Chart, { tip }, [
+        svg,
+        h('div', { key: 'zoombar', className: 'tps-zoombar' }, [
+          h('span', { key: 'hint' }, t('zoomHint')),
+          zoom !== null && h('button', { key: 'reset', className: 'tps-zoomreset', onClick: reset }, t('resetZoom')),
+        ]),
       ])
     }
 
@@ -279,6 +473,7 @@ window.__ModuleLoader__.load({
      * dashed curve tracks them.
      */
     function HistogramChart({ samples }) {
+      const [tip, setTip] = React.useState(null)
       const values = samples.map((sample) => sample.tps).filter((value) => typeof value === 'number' && value > 0).sort((a, b) => a - b)
       if (values.length < 5) return null
       const lo = quantile(values, 0.02)
@@ -310,7 +505,8 @@ window.__ModuleLoader__.load({
           return { value, expected }
         })
         : []
-      return h('svg', { className: 'tps-chart', viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': 'histogram' }, [
+      const hovered = tip?.bin ?? -1
+      return h(Chart, { tip }, h('svg', { className: 'tps-chart', viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': 'histogram' }, [
         [0.5, 1].map((fraction) => h('line', {
           key: String(fraction), x1: m.left, x2: width - m.right, y1: y(maxCount * fraction), y2: y(maxCount * fraction), stroke: GRID_STROKE,
         })),
@@ -319,8 +515,19 @@ window.__ModuleLoader__.load({
         ...counts.map((count, index) => h('rect', {
           key: index,
           x: m.left + index * barWidth + 1, y: y(count), width: Math.max(1, barWidth - 2), height: m.top + innerHeight - y(count),
-          rx: 2, fill: 'currentColor', 'fill-opacity': 0.3,
-        }, h('title', null, `${formatTps(lo + index * binWidth)}–${formatTps(lo + (index + 1) * binWidth)} tok/s: ${count}`))),
+          rx: 2, fill: 'currentColor', 'fill-opacity': hovered === index ? 0.55 : 0.3,
+          onMouseMove: (event) => {
+            const p = svgPos(event, width, height)
+            setTip({
+              px: p.px, py: p.py, flip: p.flip, bin: index,
+              lines: [
+                `${formatTps(lo + index * binWidth)}–${formatTps(lo + (index + 1) * binWidth)} tok/s`,
+                `n = ${count} (${Math.round((count / values.length) * 100)}%)`,
+              ],
+            })
+          },
+          onMouseLeave: () => setTip(null),
+        })),
         curve.length > 0 && h('path', {
           key: 'curve',
           d: curve.map((point, index) => `${index === 0 ? 'M' : 'L'}${x(point.value).toFixed(1)},${y(point.expected).toFixed(1)}`).join(''),
@@ -328,11 +535,12 @@ window.__ModuleLoader__.load({
         }),
         h('text', { key: 'x0', x: m.left, y: height - 6, 'font-size': 11, fill: TICK_FILL }, formatTps(lo)),
         h('text', { key: 'x1', x: width - m.right, y: height - 6, 'text-anchor': 'end', 'font-size': 11, fill: TICK_FILL }, formatTps(hi)),
-      ])
+      ]))
     }
 
     /** Horizontal IQR box plot, one row per visible model: whiskers at 1.5·IQR, outliers as dots. */
     function BoxPlotChart({ models, samples }) {
+      const [tip, setTip] = React.useState(null)
       const rows = models.filter((entry) => entry.count >= 4)
       if (rows.length === 0) return null
       const pointsByModel = new Map(models.map((entry) => [entry.name, []]))
@@ -347,7 +555,7 @@ window.__ModuleLoader__.load({
       const innerWidth = width - m.left - m.right
       const scaleMax = Math.max(...rows.map((entry) => entry.q3 + 1.5 * (entry.q3 - entry.q1))) * 1.08
       const x = (value) => m.left + (value / scaleMax) * innerWidth
-      return h('svg', { className: 'tps-chart', viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': 'box plot' }, [
+      return h(Chart, { tip }, h('svg', { className: 'tps-chart', viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': 'box plot' }, [
         [0, 0.5, 1].map((fraction) => {
           const value = fraction * scaleMax
           return h('g', { key: String(fraction) }, [
@@ -362,26 +570,48 @@ window.__ModuleLoader__.load({
           const hiWhisker = Math.min(entry.max, entry.q3 + 1.5 * iqr)
           const outliers = points.filter((value) => value < loWhisker || value > hiWhisker)
           const cy = m.top + index * rowHeight + 22
-          return h('g', { key: entry.name }, [
+          const hovered = tip?.row === entry.name
+          return h('g', {
+            key: entry.name,
+            onMouseMove: (event) => {
+              const p = svgPos(event, width, height)
+              setTip({
+                px: p.px, py: p.py, flip: p.flip, row: entry.name,
+                lines: [
+                  `${entry.name} (n=${points.length})`,
+                  `median ${formatTps(entry.median)} · Q1 ${formatTps(entry.q1)} · Q3 ${formatTps(entry.q3)}`,
+                  `whiskers ${formatTps(loWhisker)}–${formatTps(hiWhisker)} (1.5·IQR) · outliers ${outliers.length}`,
+                ],
+              })
+            },
+            onMouseLeave: () => setTip(null),
+          }, [
             h('text', { x: m.left, y: cy - 11, 'font-size': 11, fill: TICK_FILL }, entry.name),
-            h('line', { x1: x(loWhisker), x2: x(hiWhisker), y1: cy, y2: cy, stroke: entry.color, 'stroke-opacity': 0.55 }),
+            h('line', { x1: x(loWhisker), x2: x(hiWhisker), y1: cy, y2: cy, stroke: entry.color, 'stroke-opacity': hovered ? 0.9 : 0.55 }),
             h('line', { x1: x(loWhisker), x2: x(loWhisker), y1: cy - 4, y2: cy + 4, stroke: entry.color, 'stroke-opacity': 0.7 }),
             h('line', { x1: x(hiWhisker), x2: x(hiWhisker), y1: cy - 4, y2: cy + 4, stroke: entry.color, 'stroke-opacity': 0.7 }),
             h('rect', {
               x: x(entry.q1), y: cy - 7, width: Math.max(2, x(entry.q3) - x(entry.q1)), height: 14, rx: 3,
-              fill: entry.color, 'fill-opacity': 0.35, stroke: entry.color,
-            }, h('title', null, `${entry.name}\nQ1 ${formatTps(entry.q1)} · median ${formatTps(entry.median)} · Q3 ${formatTps(entry.q3)}\nwhiskers ${formatTps(loWhisker)}–${formatTps(hiWhisker)} (1.5·IQR)`)),
+              fill: entry.color, 'fill-opacity': hovered ? 0.55 : 0.35, stroke: entry.color,
+            }),
             h('line', { x1: x(entry.median), x2: x(entry.median), y1: cy - 7, y2: cy + 7, stroke: entry.color, 'stroke-width': 2.2 }),
             ...outliers.map((value, outlierIndex) => h('circle', {
-              key: outlierIndex, cx: x(value), cy, r: 2.2, fill: entry.color, 'fill-opacity': 0.7,
-            }, h('title', null, `${formatTps(value)} tok/s`))),
+              key: outlierIndex, cx: x(value), cy, r: hovered ? 3 : 2.2, fill: entry.color, 'fill-opacity': 0.7,
+              onMouseMove: (event) => {
+                event.stopPropagation()
+                const p = svgPos(event, width, height)
+                setTip({ px: p.px, py: p.py, flip: p.flip, row: entry.name, lines: [entry.name, `outlier ${formatTps(value)} tok/s`] })
+              },
+            })),
+            h('rect', { x: m.left, y: cy - 15, width: innerWidth, height: 30, fill: 'transparent', style: { cursor: 'default' } }),
           ])
         }),
-      ])
+      ]))
     }
 
     /** Median tokens/second per hour of day (local time), across visible models. */
     function HourlyChart({ samples }) {
+      const [tip, setTip] = React.useState(null)
       const buckets = Array.from({ length: 24 }, () => [])
       for (const sample of samples) {
         if (typeof sample.tps === 'number' && sample.tps > 0) buckets[new Date(sample.time).getHours()].push(sample.tps)
@@ -398,24 +628,39 @@ window.__ModuleLoader__.load({
       const slot = innerWidth / 24
       const barWidth = slot * 0.66
       const y = (value) => m.top + innerHeight * (1 - value / max)
-      return h('svg', { className: 'tps-chart', viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': 'hourly' }, [
+      return h(Chart, { tip }, h('svg', { className: 'tps-chart', viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': 'hourly' }, [
         [0.5, 1].map((fraction) => h('line', {
           key: String(fraction), x1: m.left, x2: width - m.right, y1: y(max * fraction / 1.15), y2: y(max * fraction / 1.15), stroke: GRID_STROKE,
         })),
         ...medians.map((value, hour) => {
           if (value === null) return null
           const barHeight = innerHeight - (y(value) - m.top)
-          return h('g', { key: hour }, [
+          const hovered = tip?.hour === hour
+          return h('g', {
+            key: hour,
+            onMouseMove: (event) => {
+              const p = svgPos(event, width, height)
+              setTip({
+                px: p.px, py: p.py, flip: p.flip, hour,
+                lines: [
+                  `${String(hour).padStart(2, '0')}:00`,
+                  `median ${formatTps(value)} tok/s`,
+                  `n = ${buckets[hour].length}`,
+                ],
+              })
+            },
+            onMouseLeave: () => setTip(null),
+          }, [
             h('rect', {
               x: m.left + hour * slot + (slot - barWidth) / 2, y: y(value), width: barWidth, height: barHeight,
-              rx: 2, fill: 'currentColor', 'fill-opacity': 0.35,
-            }, h('title', null, `${String(hour).padStart(2, '0')}:00 · median ${formatTps(value)} tok/s · n=${buckets[hour].length}`)),
+              rx: 2, fill: 'currentColor', 'fill-opacity': hovered ? 0.6 : 0.35,
+            }),
             hour % 3 === 0 && h('text', {
               x: m.left + hour * slot + slot / 2, y: height - 5, 'text-anchor': 'middle', 'font-size': 10, fill: TICK_FILL,
             }, String(hour)),
           ])
         }),
-      ])
+      ]))
     }
 
     /** Compact per-model stats table: n, mean, median, quartiles, extremes. */
@@ -430,6 +675,29 @@ window.__ModuleLoader__.load({
           ])),
           [entry.count, entry.mean, entry.median, entry.q1, entry.q3, entry.min, entry.max].map((value, index) =>
             h('td', { key: index }, typeof value === 'number' ? formatTps(value) : String(value ?? '—'))),
+        ]))),
+      ])
+    }
+
+    /**
+     * Verbosity table: medians of output tokens, thinking share, visible and
+     * reasoning characters, and the out/in ratio per model.
+     */
+    function VerbosityTable({ rows, t }) {
+      const labels = [t('colModel'), t('colN'), t('colOutTok'), t('colThinkShare'), t('colText'), t('colThink'), t('colOutIn')]
+      const fmtInt = (value) => value === null || value === undefined ? '—' : (value >= 1000 ? `${(value / 1000).toFixed(1)}k` : String(Math.round(value)))
+      const fmtPct = (value, estimated) => value === null || value === undefined ? '—' : `${(value * 100).toFixed(1)}%${estimated ? '*' : ''}`
+      const fmtRatio = (value) => value === null || value === undefined ? '—' : value.toFixed(value < 0.1 ? 3 : 2)
+      return h('table', { className: 'tps-table' }, [
+        h('thead', { key: 'head' }, h('tr', null, labels.map((label, index) => h('th', { key: index }, label)))),
+        h('tbody', { key: 'body' }, rows.map((row) => h('tr', { key: row.name }, [
+          h('td', { key: 'name' }, row.name),
+          h('td', { key: 'n' }, fmtInt(row.n)),
+          h('td', { key: 'out' }, fmtInt(row.medOutput)),
+          h('td', { key: 'share' }, fmtPct(row.medShare, row.shareEstimated)),
+          h('td', { key: 'text' }, fmtInt(row.medText)),
+          h('td', { key: 'think' }, fmtInt(row.medThink)),
+          h('td', { key: 'outin' }, fmtRatio(row.medOutIn)),
         ]))),
       ])
     }
@@ -569,6 +837,11 @@ window.__ModuleLoader__.load({
           h('section', { key: 'hourly', className: 'tps-card' }, [
             h('h3', { key: 'label', className: 'tps-card-title' }, translate('hourly')),
             h(HourlyChart, { samples: visibleSamples }),
+          ]),
+          h('section', { key: 'verbosity', className: 'tps-card tps-card-wide' }, [
+            h('h3', { key: 'label', className: 'tps-card-title' }, translate('verbosity')),
+            h(VerbosityTable, { rows: verbosityStats(visibleSamples), t: translate }),
+            h('p', { key: 'vhint', className: 'tps-hint', style: { margin: '6px 0 2px' } }, translate('verbosityHint')),
           ]),
           h('section', { key: 'table', className: 'tps-card tps-card-wide' }, [
             h('h3', { key: 'label', className: 'tps-card-title' }, translate('table')),

@@ -104,6 +104,30 @@ function streamWindow(stream) {
 }
 
 /**
+ * Total visible-answer and thinking characters over the compact stream
+ * records. Providers that never report `reasoningTokens` still stream
+ * `reasoning-chunks`, so character counts are the portable fallback for the
+ * verbosity view; `text-chunks` covers the reply the user actually reads.
+ */
+function streamTextShares(stream) {
+  let textChars = 0
+  let reasoningChars = 0
+  for (const record of stream ?? []) {
+    if (typeof record !== 'object' || record === null) continue
+    if (record.type === 'text-chunks' && Array.isArray(record.texts)) {
+      for (const text of record.texts) if (typeof text === 'string') textChars += text.length
+    } else if (record.type === 'reasoning-chunks' && Array.isArray(record.texts)) {
+      for (const text of record.texts) if (typeof text === 'string') reasoningChars += text.length
+    } else if (record.type === 'chunk') {
+      const chunk = record.chunk
+      if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') textChars += chunk.text.length
+      else if (chunk?.type === 'reasoning-delta' && typeof chunk.text === 'string') reasoningChars += chunk.text.length
+    }
+  }
+  return { textChars, reasoningChars }
+}
+
+/**
  * Derive one throughput sample from an `assistant/message` event.
  * Only model-sourced messages sample; steps without usage still record their
  * timing with a null `tps` so the data distinguishes "no usage" from
@@ -123,6 +147,8 @@ function sampleOf(sessionId, event, stepStartTime, effective) {
   if (window === null) return null
   const usage = event.data.usage
   const outputTokens = typeof usage?.outputTokens === 'number' ? usage.outputTokens : null
+  const reasoningTokens = typeof usage?.reasoningTokens === 'number' ? usage.reasoningTokens : null
+  const shares = streamTextShares(event.data.stream)
   const decodeMs = Math.max(0, window.lastTime - window.firstTime)
   const rate = outputTokens !== null && decodeMs > 0 ? outputTokens / (decodeMs / 1000) : null
   const measurable = rate !== null && decodeMs >= MIN_DECODE_MS && rate <= effective.maxPlausibleTps
@@ -136,6 +162,9 @@ function sampleOf(sessionId, event, stepStartTime, effective) {
     decodeMs,
     outputTokens,
     inputTokens: typeof usage?.inputTokens === 'number' ? usage.inputTokens : null,
+    reasoningTokens,
+    textChars: shares.textChars,
+    reasoningChars: shares.reasoningChars,
     tps: measurable ? Number(rate.toFixed(2)) : null,
     interrupted: event.data.interrupted === true,
   }
@@ -270,7 +299,7 @@ function createFileStore(file) {
   return { enqueue, initialize, append, sweep, readAll, fileSize }
 }
 
-const CSV_HEADER = 'time_iso,model,provider,turn,step,ttft_ms,decode_ms,output_tokens,input_tokens,tps,interrupted,session_id'
+const CSV_HEADER = 'time_iso,model,provider,turn,step,ttft_ms,decode_ms,output_tokens,input_tokens,reasoning_tokens,text_chars,reasoning_chars,tps,interrupted,session_id'
 
 function toCsvRow(sample) {
   const cells = [
@@ -283,6 +312,9 @@ function toCsvRow(sample) {
     sample.decodeMs ?? '',
     sample.outputTokens ?? '',
     sample.inputTokens ?? '',
+    sample.reasoningTokens ?? '',
+    sample.textChars ?? '',
+    sample.reasoningChars ?? '',
     sample.tps === null || sample.tps === undefined ? '' : sample.tps.toFixed(2),
     sample.interrupted === true ? 'true' : 'false',
     sample.sessionId ?? '',

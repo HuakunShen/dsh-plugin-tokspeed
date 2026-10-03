@@ -85,6 +85,33 @@ console.log('1. rate-limit: recorded', lines.length, '(expect 2)')
 const first = JSON.parse(lines[0])
 console.log('2. math: tps', first.tps, 'decodeMs', first.decodeMs, 'sessionId', first.sessionId, '(expect 50 / 1000 / s1)')
 
+// 2b. verbosity fields: reasoning tokens + streamed text/reasoning characters are sampled.
+const verbositySample = await (async () => {
+  for (const fn of listeners.get('session/event') ?? []) {
+    fn(
+      { id: 's1' },
+      {
+        type: 'assistant/message',
+        time: 1_000_300,
+        data: {
+          turn: 1,
+          step: 2,
+          stream: [
+            { type: 'reasoning-chunks', time0: 1_000_300, dt: [10], texts: ['thinking…'] },
+            { type: 'text-chunks', time0: 1_000_350, dt: [10, 10], texts: ['hello ', 'world'] },
+          ],
+          usage: { inputTokens: 100, outputTokens: 25, reasoningTokens: 15 },
+          message: { source: { kind: 'model', provider: 'test-provider', model: 'model-a' } },
+        },
+      },
+    )
+  }
+  await sleep(120)
+  const all = (await call('/dsh-tokspeed/samples.jsonl')).body.trim().split('\n')
+  return JSON.parse(all[all.length - 1])
+})()
+console.log('2b. verbosity: reasoningTokens', verbositySample.reasoningTokens, '(expect 15) | textChars', verbositySample.textChars, '(expect 11) | reasoningChars', verbositySample.reasoningChars, '(expect 9)')
+
 // 3. rotation: push total far past 900 bytes -> file stays under the cap.
 for (let index = 0; index < 30; index += 1) emit(1_100_000 + index * 500, 'model-a', 40, 's1')
 await sleep(400)
